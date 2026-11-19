@@ -20,4 +20,5 @@ COPY --from=build /app/prisma ./prisma
 COPY package.json ./
 EXPOSE 3000
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "dist/server.js"]
+# Apply database migrations on every start (safe to repeat), then start the API.
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/server.js"]
