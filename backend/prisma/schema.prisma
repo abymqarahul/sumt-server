@@ -1,0 +1,221 @@
+// SUMT backend schema — PostgreSQL
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum InstallationStatus {
+  PENDING
+  ACTIVE
+  BLOCKED
+  REVOKED
+}
+
+enum LicenseStatus {
+  ACTIVE
+  REVOKED
+  TRANSFERRED
+}
+
+enum AdminRole {
+  SUPERADMIN
+  ADMIN
+  VIEWER
+}
+
+enum ActorType {
+  ADMIN
+  DEVICE
+  SYSTEM
+}
+
+enum ResourceKind {
+  FIRMWARE
+  REPAIR_DATA
+  WIRING_DIAGRAM
+  KNOWLEDGE_BASE
+  APP_UPDATE
+}
+
+enum ResourceChannel {
+  STABLE
+  BETA
+}
+
+model Installation {
+  id                       String             @id @default(uuid()) @db.Uuid
+  /// Human-facing sequential number; displayed as SUMT-<seq>
+  seq                      Int                @unique @default(autoincrement())
+  displayId                String             @unique
+  publicKey                String             /// SPKI DER, base64
+  keyFingerprint           String             @unique /// sha256(SPKI) hex
+  keyAlgorithm             String             @default("EC_P256")
+  deviceManufacturer       String?
+  deviceModel              String?
+  deviceSdkInt             Int?
+  appVersionName           String?
+  appVersionCode           Int?
+  integrityVerdict         String?
+  status                   InstallationStatus @default(PENDING)
+  customerName             String?
+  customerPhone            String?
+  notes                    String?
+  blockReason              String?
+  failedActivationAttempts Int                @default(0)
+  activationLockedUntil    DateTime?
+  createdAt                DateTime           @default(now())
+  updatedAt                DateTime           @updatedAt
+  lastSeenAt               DateTime?
+  lastSeenIp               String?
+  activatedAt              DateTime?
+  blockedAt                DateTime?
+
+  licenses       License[]
+  activationKeys ActivationKey[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("installations")
+}
+
+model License {
+  id             String        @id @default(uuid()) @db.Uuid
+  installationId String        @db.Uuid
+  installation   Installation  @relation(fields: [installationId], references: [id], onDelete: Restrict)
+  status         LicenseStatus @default(ACTIVE)
+  plan           String        @default("STANDARD")
+  issuedAt       DateTime      @default(now())
+  /// null = lifetime
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  revokeReason   String?
+  activationKeyId String?      @unique @db.Uuid
+  activationKey  ActivationKey? @relation(fields: [activationKeyId], references: [id])
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([installationId, status])
+  @@map("licenses")
+}
+
+model ActivationKey {
+  id                  String       @id @default(uuid()) @db.Uuid
+  installationId      String       @db.Uuid
+  installation        Installation @relation(fields: [installationId], references: [id], onDelete: Restrict)
+  /// HMAC-SHA256(pepper, normalized key) hex. Plain key is never stored.
+  keyHash             String       @unique
+  /// last 4 characters, for display in history only
+  keyHint             String
+  /// licence length granted when consumed; null = lifetime
+  licenseDurationDays Int?
+  plan                String       @default("STANDARD")
+  createdById         String?      @db.Uuid
+  createdBy           Admin?       @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt           DateTime     @default(now())
+  expiresAt           DateTime
+  consumedAt          DateTime?
+  consumedIp          String?
+  revokedAt           DateTime?
+  license             License?
+
+  @@index([installationId])
+  @@map("activation_keys")
+}
+
+model Admin {
+  id            String      @id @default(uuid()) @db.Uuid
+  email         String      @unique
+  name          String?
+  passwordHash  String
+  role          AdminRole   @default(ADMIN)
+  disabled      Boolean     @default(false)
+  failedLogins  Int         @default(0)
+  lockedUntil   DateTime?
+  lastLoginAt   DateTime?
+  /// bump to invalidate every access token of this admin
+  tokenVersion  Int         @default(0)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  sessions       AdminSession[]
+  activationKeys ActivationKey[]
+  resources      Resource[]
+
+  @@map("admins")
+}
+
+model AdminSession {
+  id               String    @id @default(uuid()) @db.Uuid
+  adminId          String    @db.Uuid
+  admin            Admin     @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  refreshTokenHash String    @unique
+  userAgent        String?
+  ip               String?
+  createdAt        DateTime  @default(now())
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  replacedById     String?   @db.Uuid
+
+  @@index([adminId])
+  @@map("admin_sessions")
+}
+
+model UsedNonce {
+  nonce          String   @id
+  installationId String   @db.Uuid
+  expiresAt      DateTime
+
+  @@index([expiresAt])
+  @@map("used_nonces")
+}
+
+model Resource {
+  id             String          @id @default(uuid()) @db.Uuid
+  kind           ResourceKind
+  /// stable logical name, e.g. "esp32-bridge"; versions share a slug
+  slug           String
+  name           String
+  versionName    String
+  versionCode    Int
+  channel        ResourceChannel @default(STABLE)
+  targetHardware String?
+  minAppVersionCode Int?
+  fileName       String
+  mimeType       String          @default("application/octet-stream")
+  sizeBytes      BigInt
+  sha256         String
+  storageKey     String          @unique
+  releaseNotes   String?
+  published      Boolean         @default(false)
+  publishedAt    DateTime?
+  uploadedById   String?         @db.Uuid
+  uploadedBy     Admin?          @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@unique([slug, versionCode, channel])
+  @@index([kind, published])
+  @@map("resources")
+}
+
+model AuditLog {
+  id         BigInt    @id @default(autoincrement())
+  actorType  ActorType
+  actorId    String?
+  action     String
+  targetType String?
+  targetId   String?
+  ip         String?
+  meta       Json?
+  createdAt  DateTime  @default(now())
+
+  @@index([createdAt])
+  @@index([targetType, targetId])
+  @@index([action])
+  @@map("audit_logs")
+}
